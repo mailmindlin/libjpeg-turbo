@@ -80,6 +80,156 @@
 	}  \
 }
 
+static void __doReleaseDirectBuffer(JNIEnv* env, jbyteArray arrayRef, unsigned char* ptr) {
+	//Suppress unused parameter warning messages
+	(void)(env);
+	(void)(arrayRef);
+	(void)(ptr);
+	//NOP
+	dprint(LOG_V4L4J, "Releasing direct pointer\n");
+}
+
+static void __doReleaseArray(JNIEnv* env, jbyteArray arrayRef, unsigned char* ptr) {
+	dprint(LOG_V4L4J, "Releasing array ref\n");
+	(*env)->ReleaseByteArrayElements(env, arrayRef, (jbyte*) ptr, 0);
+	(*env)->DeleteLocalRef(env, arrayRef);
+}
+
+
+/**
+ * Get a pointer from a buffer, whether direct or not.
+ * @param env the JNI environment for this thread
+ * @param buffer The buffer to get a pointer to
+ * @param arrayRef If not null, will be set to NULL if a direct pointer can be recieved, else the array that is backing the returned pointer
+ * @param len If not null, will be set to the length of the returned pointer, in bytes.
+ */
+inline unsigned char* getBufferPointer(JNIEnv *env, jobject buffer, jbyteArray* arrayRef, unsigned int* off, unsigned int* len, void (**release)(JNIEnv* env, jbyteArray arrayRef, unsigned char* ptr)) {
+	unsigned char* result = (*env)->GetDirectBufferAddress(env, buffer);
+	if (result) {
+		if (arrayRef)
+			*arrayRef = NULL;
+		if (off)
+			*off = (unsigned) getBufferPosition(env, buffer);
+		if (len)
+			*len = (*env)->GetDirectBufferCapacity(env, buffer);
+		if (release)
+			*release = __doReleaseDirectBuffer;
+		return result;
+	}
+	if ((*env)->ExceptionCheck(env))
+		(*env)->ExceptionDescribe(env);
+	if (buffer == NULL) {
+		_throwarg("Buffer was null");
+		return NULL;
+	}
+	jclass bufferClass = (*env)->GetObjectClass(env, buffer);
+	if (!bufferClass) {
+		_throwtj();
+		return NULL;
+	}
+	jmethodID bufferHasArrayMID = (*env)->GetMethodID(env, bufferClass, "hasArray", "()Z");
+	if (!bufferHasArrayMID) {
+		(*env)->DeleteLocalRef(env, bufferClass);
+		_throwtj();
+		return NULL;
+	}
+	jboolean hasArray = (*env)->CallBooleanMethod(env, buffer, bufferHasArrayMID);
+	if ((*env)->ExceptionCheck(env) || !hasArray) {
+		(*env)->DeleteLocalRef(env, bufferClass);
+		return NULL;
+	}
+	jmethodID bufferGetArrayMID = (*env)->GetMethodID(env, bufferClass, "array", "()[B");
+	(*env)->DeleteLocalRef(env, bufferClass);
+	if (!bufferGetArrayMID) {
+		_throwtj();
+		return NULL;
+	}
+	jbyteArray array = (jbyteArray) (*env)->CallObjectMethod(env, buffer, bufferGetArrayMID);
+	if (!array) {
+		_throwtj();
+		return NULL;
+	}
+	jbyte* arrayElements = (*env)->GetByteArrayElements(env, array, NULL);
+	if (!arrayElements) {
+		(*env)->DeleteLocalRef(env, array);
+		_throwtj();
+		return NULL;
+	}
+	if (off)
+		*off = getBufferPosition(env, buffer);
+	if (len)
+		*len = (*env)->GetArrayLength(env, array);
+	if (arrayRef)
+		*arrayRef = array;
+	if (release)
+		*release = __doReleaseArray;
+	return (unsigned char*) arrayElements;
+}
+/**
+ * Set the position value for a ByteBuffer. Note that this method will create <4
+ * @param env The JNI environment pointer
+ * @param buffer The buffer object to set the position on
+ */
+inline void setBufferPosition(JNIEnv *env, jobject buffer, int position) {
+	jclass bufferClass = lookupClassSafe(env, buffer);
+	if (!bufferClass)
+		return;
+	jmethodID positionSetMethodID = (*env)->GetMethodID(env, bufferClass, "position", "(I)Ljava/nio/Buffer;");
+	(*env)->DeleteLocalRef(env, bufferClass);
+	if (!positionSetMethodID) {
+		THROW_EXCEPTION(env, JNI_EXCP, "Could not lookup ByteBuffer#position(I) for buffer.");
+		return;
+	}
+	jobject result = (*env)->CallObjectMethod(env, buffer, positionSetMethodID, position);
+	if (result)
+		(*env)->DeleteLocalRef(env, result);
+}
+
+inline int getBufferPosition(JNIEnv *env, jobject buffer) {
+	jclass bufferClass = lookupClassSafe(env, buffer);
+	if (!bufferClass)
+		return -1;
+	jmethodID positionMethodID = (*env)->GetMethodID(env, bufferClass, "position", "()I");
+	(*env)->DeleteLocalRef(env, bufferClass);
+	if (!positionMethodID) {
+		THROW_EXCEPTION(env, JNI_EXCP, "Could not lookup ByteBuffer#position() for buffer.");
+		return -1;
+	}
+	return (*env)->CallIntMethod(env, buffer, positionMethodID);
+}
+
+/**
+ * Set the limit value for a ByteBuffer.
+ * @param env The JNI environment pointer
+ * @param buffer The buffer object to set the limit on
+ * @param limit the value to set the limit to
+ */
+inline void setBufferLimit(JNIEnv *env, jobject buffer, int limit) {
+	jclass bufferClass = lookupClassSafe(env, buffer);
+	if (!bufferClass)
+		return;
+	jmethodID limitSetMethodID = (*env)->GetMethodID(env, bufferClass, "limit", "(I)Ljava/nio/Buffer;");
+	(*env)->DeleteLocalRef(env, bufferClass);
+	if (!limitSetMethodID) {
+		THROW_EXCEPTION(env, JNI_EXCP, "Could not lookup ByteBuffer#limit(I) for buffer.");
+		return;
+	}
+	(*env)->CallVoidMethod(env, buffer, limitSetMethodID, limit);
+}
+
+inline int getBufferLimit(JNIEnv *env, jobject buffer) {
+	jclass bufferClass = lookupClassSafe(env, buffer);
+	if (!bufferClass)
+		return -1;
+	jmethodID limitMethodID = (*env)->GetMethodID(env, bufferClass, "limit", "()I");
+	(*env)->DeleteLocalRef(env, bufferClass);
+	if (!limitMethodID) {
+		THROW_EXCEPTION(env, JNI_EXCP, "Could not lookup ByteBuffer#limit() for buffer.");
+		return -1;
+	}
+	return (*env)->CallIntMethod(env, buffer, limitMethodID);
+}
+
 int ProcessSystemProperties(JNIEnv *env)
 {
 	jclass cls;  jmethodID mid;
@@ -592,24 +742,33 @@ JNIEXPORT jobjectArray JNICALL Java_org_libjpegturbo_turbojpeg_TJ_getScalingFact
 
 /* TurboJPEG 1.2.x: TJDecompressor::decompressHeader() */
 JNIEXPORT void JNICALL Java_org_libjpegturbo_turbojpeg_TJDecompressor_decompressHeader
-	(JNIEnv *env, jobject obj, jbyteArray src, jint jpegSize)
+	(JNIEnv *env, jobject obj, jobject src, jint jpegSize)
 {
 	tjhandle handle=0;
+	void (*releaseBuffer)(JNIEnv* env, jbyteArray arrayRef, unsigned char* ptr) = NULL;
 	unsigned char *jpegBuf=NULL;
+	jbyteArray arrayRef;
 	int width=0, height=0, jpegSubsamp=-1, jpegColorspace=-1;
 
 	gethandle();
-
-	if((*env)->GetArrayLength(env, src)<jpegSize)
+	
+	int srcLimit = getBufferLimit(buf);
+	int srcPos = getBufferPosition(buf);
+	if (srcLimit < 0 || srcPos < 0 || (*env)->ExceptionCheck(env))
+		goto bailout;
+	
+	if(srcLimit - srcPos < jpegSize)
 		_throwarg("Source buffer is not large enough");
 
-	bailif0(jpegBuf=(*env)->GetPrimitiveArrayCritical(env, src, 0));
+	bailif0(jpegBuf = getBufferPointer(env, src, &arrayRef, NULL, &releaseBuffer));
 
 	if(tjDecompressHeader3(handle, jpegBuf, (unsigned long)jpegSize,
-		&width, &height, &jpegSubsamp, &jpegColorspace)==-1)
+		&width, &height, &jpegSubsamp, &jpegColorspace) == -1)
 		_throwtj();
-
-	(*env)->ReleasePrimitiveArrayCritical(env, src, jpegBuf, 0);  jpegBuf=NULL;
+	
+	
+	releaseBuffer(env, arrayRef, jpegBuf);
+	jpegBuf = NULL;
 
 	bailif0(_fid=(*env)->GetFieldID(env, _cls, "jpegSubsamp", "I"));
 	(*env)->SetIntField(env, obj, _fid, jpegSubsamp);
@@ -623,18 +782,22 @@ JNIEXPORT void JNICALL Java_org_libjpegturbo_turbojpeg_TJDecompressor_decompress
 	(*env)->SetIntField(env, obj, _fid, height);
 
 	bailout:
-	if(jpegBuf) (*env)->ReleasePrimitiveArrayCritical(env, src, jpegBuf, 0);
+	if(jpegBuf && releaseBuffer)
+		releaseBuffer(env, arrayRef, jpegBuf);
 	return;
 }
 
 static void TJDecompressor_decompress
-	(JNIEnv *env, jobject obj, jbyteArray src, jint jpegSize, jarray dst,
+	(JNIEnv *env, jobject obj, jobject src, jint jpegSize, jobject dst,
 		jint dstElementSize, jint x, jint y, jint width, jint pitch, jint height,
 		jint pf, jint flags)
 {
 	tjhandle handle=0;
 	jsize arraySize=0, actualPitch;
 	unsigned char *jpegBuf=NULL, *dstBuf=NULL;
+	void (*releaseSrc)(JNIEnv* env, jbyteArray arrayRef, unsigned char* ptr) = NULL;
+	void (*releaseDst)(JNIEnv* env, jbyteArray arrayRef, unsigned char* ptr) = NULL;
+	jbyteArray srcArrayRef, dstArrayRef;
 
 	gethandle();
 
@@ -643,15 +806,15 @@ static void TJDecompressor_decompress
 	if(org_libjpegturbo_turbojpeg_TJ_NUMPF!=TJ_NUMPF)
 		_throwarg("Mismatch between Java and C API");
 
-	if((*env)->GetArrayLength(env, src)<jpegSize)
+	if(getBufferLimit(env, src) - getBufferPosition(env, src) < jpegSize)
 		_throwarg("Source buffer is not large enough");
 	actualPitch=(pitch==0)? width*tjPixelSize[pf]:pitch;
 	arraySize=(y+height-1)*actualPitch + (x+width)*tjPixelSize[pf];
-	if((*env)->GetArrayLength(env, dst)*dstElementSize<arraySize)
+	if((getBufferLimit(env, dst) - getBufferPosition(env, dst)) * dstElementSize<arraySize)
 		_throwarg("Destination buffer is not large enough");
 
-	bailif0(jpegBuf=(*env)->GetPrimitiveArrayCritical(env, src, 0));
-	bailif0(dstBuf=(*env)->GetPrimitiveArrayCritical(env, dst, 0));
+	bailif0(jpegBuf = getBufferPointer(env, src, srcArrayRef, NULL, &releaseSrc));
+	bailif0(dstBuf = getBufferPointer(env, dst, dstArrayRef, NULL, &releaseDst));
 
 	if(tjDecompress2(handle, jpegBuf, (unsigned long)jpegSize,
 		&dstBuf[y*actualPitch + x*tjPixelSize[pf]], width, pitch, height, pf,
@@ -659,8 +822,10 @@ static void TJDecompressor_decompress
 		_throwtj();
 
 	bailout:
-	if(dstBuf) (*env)->ReleasePrimitiveArrayCritical(env, dst, dstBuf, 0);
-	if(jpegBuf) (*env)->ReleasePrimitiveArrayCritical(env, src, jpegBuf, 0);
+	if(dstBuf && releaseDst)
+		releaseDst(env, dstArrayRef, dstBuf);
+	if(jpegBuf && releaseSrc)
+		releaseSrc(env, srcArrayRef, jpegBuf);
 	return;
 }
 
